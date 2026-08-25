@@ -1,0 +1,571 @@
+openapi: 3.1.0
+info:
+  title: TransparentCars Public API
+  version: "1.0.0"
+  summary: Key-free JSON API for the Portuguese local used-car market — stock, fair-price valuation, annual road tax (IUC) and lead capture.
+  description: |
+    Open, key-free JSON API from **TransparentCars** (transparent.pt) — affordable used cars,
+    no hidden costs. It exposes the same data the public site runs on:
+
+    - `GET /cars`, `GET /cars/{slug}` — the cars currently for sale (published stock).
+    - `GET /valuation` — a **fair-price range** for a car, built from comparable Portuguese
+      listings (asking-price band). Answers "is this price fair?".
+    - `GET /isv` — a **running-cost / road-tax** lookup. The useful field is `iuc`
+      (Imposto Único de Circulação, the **annual road tax** a car costs to keep on the road).
+    - `GET /car_refs` — the canonical make / model vocabulary the valuation endpoint expects.
+    - `POST /lead` — consent-gated contact / callback request.
+
+    **Auth.** None. The API is public and key-free by design. Per-IP fair-use rate limits apply
+    (see `x-rate-limit`); calculator/valuation responses may be cached at the edge.
+
+    **Honesty / accuracy.** The `iuc` road-tax figure is a maintained estimate of the Portuguese
+    annual circulation tax, cross-checked periodically against public tax tables — use it for
+    planning, not as an official assessment. Valuation is an asking-price band from live
+    comparables, not an appraisal.
+
+    **Privacy.** Only `POST /lead` accepts personal data, and only with explicit `consent: true`.
+    All other endpoints take vehicle parameters and return numbers or public listing data — no PII.
+  termsOfService: https://transparent.pt/en/terms
+  contact:
+    name: TransparentCars
+    url: https://transparent.pt/en/api
+    email: info@transparent.pt
+  license:
+    name: CC BY 4.0
+    url: https://creativecommons.org/licenses/by/4.0/
+  x-logo:
+    url: https://transparent.pt/logo.png
+    altText: TransparentCars
+    backgroundColor: "#0f1115"
+
+servers:
+  - url: https://transparent.pt/api/public
+    description: Production
+
+# Public, key-free API — no authentication on any operation.
+security: []
+
+externalDocs:
+  description: API docs, quickstart & MCP server
+  url: https://transparent.pt/en/api
+
+tags:
+  - name: Inventory
+    description: Cars currently for sale.
+  - name: Valuation
+    description: Fair-price range for a car from comparable Portuguese listings.
+  - name: Running costs
+    description: Annual road-tax (IUC) lookup — what a car costs to keep on the road.
+  - name: Leads
+    description: Consent-gated contact / callback capture.
+
+x-rate-limit:
+  policy: Per-IP fair-use. No key required. 429 with Retry-After on exceed.
+  cars: DB-backed listing endpoints, tighter than the calculators.
+  valuation: 20 requests / 5 min / IP (each call hits the comparables DB).
+  isv: 60 requests / minute / IP (cached; a cache hit is free).
+  lead: 20 requests / 5 min / IP.
+  headers: 429 responses on the road-tax endpoint include `Retry-After` (seconds).
+
+paths:
+  /cars:
+    get:
+      tags: [Inventory]
+      operationId: listCars
+      summary: List cars currently for sale
+      description: |
+        Paged list of published cars for a site. Defaults to the TransparentCars stock
+        (`site=transparentcars`). Optional filters narrow by make, fuel, gearbox and price ceiling.
+      parameters:
+        - name: site
+          in: query
+          required: true
+          schema: { type: string, default: transparentcars, example: transparentcars }
+          description: Site slug. Use `transparentcars`. Unknown values return 404.
+        - name: lang
+          in: query
+          schema: { type: string, enum: [pt, en, ru, ua], default: pt }
+          description: Localises human-readable labels (fuel, gearbox, body). `ua` = Ukrainian.
+        - name: make
+          in: query
+          schema: { type: string, example: Renault }
+          description: Case-insensitive exact make match.
+        - name: fuel
+          in: query
+          schema: { type: string, example: Diesel }
+          description: Fuel code filter (matches the stored code).
+        - name: gearbox
+          in: query
+          schema: { type: string, example: Manual }
+          description: Gearbox code filter.
+        - name: max_price
+          in: query
+          schema: { type: integer, minimum: 0, example: 12000 }
+          description: Only cars at or below this asking price (EUR).
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 96, default: 24 }
+        - name: offset
+          in: query
+          schema: { type: integer, minimum: 0, default: 0 }
+      responses:
+        "200":
+          description: Paged list of published cars.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [site, lang, total, cars]
+                properties:
+                  site: { type: string }
+                  lang: { type: string }
+                  total: { type: integer, description: Total published cars matching the filters (before paging). }
+                  cars:
+                    type: array
+                    items: { $ref: "#/components/schemas/CarSummary" }
+              examples:
+                empty:
+                  summary: transparentcars — no published stock yet
+                  value: { site: transparentcars, lang: en, total: 0, cars: [] }
+                populated:
+                  summary: One car (shape captured live)
+                  value:
+                    site: transparentcars
+                    lang: en
+                    total: 1
+                    cars:
+                      - slug: renault-clio-2015
+                        make: Renault
+                        model: Clio
+                        year: 2015
+                        km: 118000
+                        price_eur: 8900
+                        tier: simple
+                        fuel: Diesel
+                        gearbox: Manual
+                        body: Hatchback
+                        photo: /photos/item/12/abc123_IMG_0001.jpeg
+        "404":
+          $ref: "#/components/responses/UnknownSite"
+
+  /cars/{slug}:
+    get:
+      tags: [Inventory]
+      operationId: getCar
+      summary: Get one car by slug
+      description: Full detail for a single published car. Slugs come from `GET /cars`.
+      parameters:
+        - name: slug
+          in: path
+          required: true
+          schema: { type: string, example: renault-clio-2015 }
+        - name: lang
+          in: query
+          schema: { type: string, enum: [pt, en, ru, ua], default: pt }
+      responses:
+        "200":
+          description: Car detail.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CarDetail" }
+              examples:
+                car:
+                  summary: Shape captured live (fields as returned)
+                  value:
+                    id: 40
+                    slug: alfa-romeo-tonale-2023
+                    make: Alfa Romeo
+                    model: Tonale
+                    year: 2023
+                    km: 24700
+                    price_eur: 31900
+                    tier: simple
+                    fuel: Plug-in hybrid
+                    gearbox: Automatic
+                    body: SUV
+                    colour: Blue
+                    hp: 280
+                    cc: 1332
+                    co2: null
+                    fuel_code: "Híbrido Plug-in"
+                    description: "<b>2023 Alfa Romeo Tonale — 280 HP Plug-in Hybrid</b><p>…</p>"
+                    youtube_url: "https://youtu.be/oD0pCMH-Pgo"
+                    photos:
+                      - /photos/item/40/3353111006be4b53_IMG_6568.jpeg
+                      - /photos/item/40/968cfda0f6522244_IMG_6574.jpeg
+                    updated_at: "2026-08-01T21:15:46.178974+00:00"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /valuation:
+    get:
+      tags: [Valuation]
+      operationId: valuation
+      summary: Fair-price range for a car
+      description: |
+        Fair-price band from comparable live Portuguese listings (asking prices). Answers
+        "is this asking price fair?". Call `GET /car_refs` first to get the exact `make`/`model`
+        strings this endpoint expects. When there aren't enough comparables it returns
+        `found: false` instead of a range.
+      parameters:
+        - { name: make,    in: query, required: true, schema: { type: string, example: Renault } }
+        - { name: model,   in: query, required: true, schema: { type: string, example: Clio } }
+        - { name: year,    in: query, required: true, schema: { type: integer, example: 2015 } }
+        - { name: km,      in: query, required: true, schema: { type: integer, minimum: 0, maximum: 1000000, example: 118000 } }
+        - { name: fuel,    in: query, schema: { type: string, example: diesel } }
+        - { name: gearbox, in: query, schema: { type: string, example: manual } }
+        - { name: hp,      in: query, schema: { type: integer, example: 90 } }
+      responses:
+        "200":
+          description: Valuation result (or `found:false` when there aren't enough comparables).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ValuationResult" }
+              examples:
+                found:
+                  summary: Enough comparables — asking-price band (captured live)
+                  value: { found: true, comps: 7, match_level: 0, days_sell: 28, rough: true, low: 26225, median: 29000, high: 32700 }
+                notfound:
+                  summary: Too few comparables
+                  value: { found: false, comps: 0 }
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  /car_refs:
+    get:
+      tags: [Valuation]
+      operationId: carRefs
+      summary: Canonical make / model vocabulary
+      description: |
+        No `make` → the list of known brands. With `make` → that brand's canonical models.
+        Pass the returned strings verbatim to `GET /valuation`.
+      parameters:
+        - { name: make, in: query, schema: { type: string, example: BMW } }
+      responses:
+        "200":
+          description: Brand list, or the models for one brand.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  makes: { type: array, items: { type: string } }
+                  make: { type: string }
+                  models: { type: array, items: { type: string } }
+              examples:
+                brands:
+                  summary: No make → brands (captured live, truncated)
+                  value: { makes: ["Mercedes-Benz", "Peugeot", "BMW", "Renault", "Volkswagen", "Audi", "Opel"] }
+                models:
+                  summary: make=BMW → models (captured live, truncated)
+                  value: { make: BMW, models: ["116", "320", "520", "X1", "118", "530", "X3"] }
+
+  /isv:
+    get:
+      tags: [Running costs]
+      operationId: roadTax
+      summary: Annual road tax (IUC) and running-cost lookup
+      description: |
+        Returns the vehicle's **annual road tax** — the `iuc` object — from engine cc, CO₂, fuel and
+        first-registration year. `iuc.iuc` is the yearly euro amount a car costs to keep on the road;
+        this is the field to use for running-cost estimates. Pure-electric vehicles come back
+        `iuc.exempt: true`. Deterministic and cached: identical parameters return identical numbers.
+
+        The response also carries an `isv` object (a one-off registration-tax figure) for
+        completeness; for local-market running-cost use, read `iuc`.
+      parameters:
+        - name: cc
+          in: query
+          description: Engine displacement in cm³ (0–10000). 0 for pure-electric.
+          schema: { type: integer, minimum: 0, maximum: 10000, default: 0, example: 1200 }
+        - name: co2
+          in: query
+          description: CO₂ emissions g/km (0–1000). WLTP for 2020+ registrations.
+          schema: { type: integer, minimum: 0, maximum: 1000, default: 0, example: 120 }
+        - name: fuel
+          in: query
+          description: Fuel type.
+          schema:
+            type: string
+            enum: [petrol, diesel, hybrid, phev, electric, lpg]
+            default: petrol
+        - name: year
+          in: query
+          description: First-registration year (1950–current). Drives the IUC year coefficient and the CO₂ additional.
+          schema: { type: integer, minimum: 1950, maximum: 2100, example: 2016 }
+        - name: month
+          in: query
+          description: First-registration month 1–12.
+          schema: { type: integer, minimum: 1, maximum: 12, default: 6 }
+        - name: used
+          in: query
+          description: Used vehicle (true) vs new (false).
+          schema: { type: boolean, default: true }
+      responses:
+        "200":
+          description: Road-tax (IUC) lookup. Read the `iuc` object.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  iuc: { $ref: "#/components/schemas/IucResult" }
+                  isv: { $ref: "#/components/schemas/IsvResult" }
+              examples:
+                diesel_2016:
+                  summary: 2016 diesel, 1950 cc, 130 g/km — captured live
+                  value:
+                    iuc:
+                      iuc: 278.85
+                      exempt: false
+                      note: null
+                      category: "B"
+                      taxa_cilindrada: 127.35
+                      taxa_co2: 97.63
+                      coef: 1.15
+                      diesel_adic: 20.12
+                      co2_adic: 0.0
+                    isv:
+                      isv: 1832.92
+                      exempt: false
+                      note: null
+                      table: "A"
+                      comp_cilindrada: 4744.62
+                      comp_ambiental: 3919.98
+                      diesel_surcharge: 500.0
+                      base: 8664.6
+                      rate_pct: 100
+                      min_isv_applied: false
+                      age_years: 10.2
+                      age_reduction_pct: 80
+                electric:
+                  summary: Pure electric — exempt from road tax
+                  value:
+                    iuc: { iuc: 0.0, exempt: true, note: "100% elétrico — isento de IUC", category: "B" }
+                    isv: { isv: 0.0, exempt: true, note: "100% elétrico — isento de ISV" }
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  /lead:
+    post:
+      tags: [Leads]
+      operationId: submitLead
+      summary: Submit a contact / callback request
+      description: |
+        Consent-gated lead capture. `consent` MUST be `true` (explicit opt-in for storing the
+        contact) and at least one reachable channel is required — a `phone` or an `email`. The
+        single `phone` field is smart-routed server-side: an address is treated as email, a
+        `@handle` / `t.me/…` as a messenger handle, otherwise it is normalised as a phone number.
+        Duplicate submissions of the same form within a short window are de-duplicated.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/LeadIn" }
+            examples:
+              contact:
+                summary: A contact-form message
+                value:
+                  kind: contact
+                  name: Maria Silva
+                  email: maria@example.com
+                  message: "Is the Clio still available?"
+                  lang: en
+                  consent: true
+              callback:
+                summary: A callback request on a specific car
+                value:
+                  kind: call
+                  phone: "+351 912 345 678"
+                  item_id: 12
+                  source: car_page
+                  consent: true
+      responses:
+        "200":
+          description: Lead accepted (or recognised as a duplicate — no new lead stored).
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean, example: true }
+                  id: { type: integer, description: New lead id (absent on a duplicate). }
+                  duplicate: { type: boolean, description: true when the submission was de-duplicated. }
+              examples:
+                created: { value: { ok: true, id: 1837 } }
+                duplicate: { value: { ok: true, duplicate: true } }
+        "422":
+          description: |
+            Validation error — missing `kind`, unknown `kind` (`{"detail":"bad kind"}`),
+            missing consent (`{"detail":"consent required"}`), or no reachable contact.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+              examples:
+                consent: { value: { detail: "consent required" } }
+                kind:    { value: { detail: "bad kind" } }
+        "429":
+          description: Too many requests (per-IP).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+              example: { detail: "too many requests" }
+
+components:
+  responses:
+    RateLimited:
+      description: Per-IP rate limit exceeded.
+      headers:
+        Retry-After:
+          description: Seconds to wait before retrying.
+          schema: { type: integer, example: 60 }
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+          example: { detail: "rate limited" }
+    UnknownSite:
+      description: Unknown site slug.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+          example: { detail: "unknown site" }
+    NotFound:
+      description: Resource not found.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+          example: { detail: "not found" }
+
+  schemas:
+    Error:
+      type: object
+      description: Error envelope. `detail` is a string for handled errors; FastAPI validation errors return an array of field errors.
+      properties:
+        detail:
+          oneOf:
+            - type: string
+            - type: array
+              items: { type: object }
+      example: { detail: "consent required" }
+
+    CarSummary:
+      type: object
+      description: One car in a list. Labels (`fuel`, `gearbox`, `body`) are localised by `lang`.
+      properties:
+        slug: { type: string, example: renault-clio-2015 }
+        make: { type: string, example: Renault }
+        model: { type: string, example: Clio }
+        year: { type: integer, example: 2015 }
+        km: { type: integer, example: 118000 }
+        price_eur: { type: integer, description: Asking price in EUR., example: 8900 }
+        tier: { type: string, description: Internal stock tier (transparentcars = "simple")., example: simple }
+        fuel: { type: [string, "null"] }
+        gearbox: { type: [string, "null"] }
+        body: { type: [string, "null"] }
+        photo:
+          type: [string, "null"]
+          description: Site-relative path to the main photo (prefix with https://transparent.pt). Null if none.
+          example: /photos/item/12/abc123_IMG_0001.jpeg
+
+    CarDetail:
+      type: object
+      description: Full car detail. Human-readable labels localised by `lang`; `fuel_code` is the raw stored code.
+      properties:
+        id: { type: integer, example: 40 }
+        slug: { type: string }
+        make: { type: string }
+        model: { type: string }
+        year: { type: integer }
+        km: { type: integer }
+        price_eur: { type: integer, description: Asking price in EUR. }
+        tier: { type: string }
+        fuel: { type: [string, "null"], description: Localised fuel label. }
+        gearbox: { type: [string, "null"] }
+        body: { type: [string, "null"] }
+        colour: { type: [string, "null"] }
+        hp: { type: [integer, "null"] }
+        cc: { type: [integer, "null"] }
+        co2: { type: [integer, "null"] }
+        fuel_code: { type: [string, "null"], description: Raw (non-localised) fuel code. }
+        description: { type: string, description: HTML description in the requested language. }
+        youtube_url: { type: [string, "null"], format: uri }
+        photos:
+          type: array
+          description: Ordered site-relative photo paths (prefix with https://transparent.pt).
+          items: { type: string }
+        updated_at: { type: string, format: date-time }
+
+    ValuationResult:
+      type: object
+      description: Fair-price band from comparable listings, or `found:false` with a comp count.
+      properties:
+        found: { type: boolean }
+        comps: { type: integer, description: Number of comparable listings found. }
+        match_level:
+          type: integer
+          description: How tightly comparables matched the query (higher = tighter). 0 = broadest match.
+        days_sell: { type: [integer, "null"], description: Typical days-to-sell for the comparables. }
+        rough: { type: boolean, description: "true when the sample is shaky (model broadened, or fewer than 5 comps)." }
+        low: { type: integer, description: "Lower bound (≈P25) of the asking-price band, EUR." }
+        median: { type: integer, description: "Median asking price, EUR." }
+        high: { type: integer, description: "Upper bound (≈P75) of the asking-price band, EUR." }
+
+    IucResult:
+      type: object
+      description: Annual road tax (IUC). `iuc` is the yearly euro amount. Electric → `exempt:true`, `iuc:0`.
+      properties:
+        iuc: { type: number, description: Annual IUC road tax in EUR., example: 278.85 }
+        exempt: { type: boolean }
+        note: { type: [string, "null"] }
+        category: { type: string, description: 'IUC category (e.g. "B" = passenger registered ≥2007).' }
+        taxa_cilindrada: { type: number, description: "Engine-displacement component, EUR." }
+        taxa_co2: { type: number, description: "CO₂ component, EUR." }
+        coef: { type: number, description: Year coefficient. }
+        diesel_adic: { type: number, description: "Diesel additional, EUR." }
+        co2_adic: { type: number, description: "CO₂ additional (registrations ≥2017), EUR." }
+
+    IsvResult:
+      type: object
+      description: |
+        One-off registration-tax figure, returned alongside `iuc` for completeness.
+        For local-market running-cost use, prefer `iuc`. Electric → `exempt:true`, `isv:0`.
+      properties:
+        isv: { type: number, example: 1832.92 }
+        exempt: { type: boolean }
+        note: { type: [string, "null"] }
+        table: { type: string }
+        comp_cilindrada: { type: number }
+        comp_ambiental: { type: number }
+        diesel_surcharge: { type: number }
+        base: { type: number }
+        rate_pct: { type: integer }
+        min_isv_applied: { type: boolean }
+        age_years: { type: number }
+        age_reduction_pct: { type: integer }
+
+    LeadIn:
+      type: object
+      required: [kind, consent]
+      description: |
+        A lead submission. `consent` must be `true`, and at least one of `phone` / `email` must be
+        present. The `phone` field is smart-routed (email / messenger handle / phone number).
+      properties:
+        kind:
+          type: string
+          enum: [contact, call]
+          description: Lead type. `contact` = message/enquiry, `call` = callback request.
+        name: { type: [string, "null"], maxLength: 200 }
+        phone:
+          type: [string, "null"]
+          maxLength: 50
+          description: Phone number, or a single free-text contact field (email / @handle) that is routed server-side.
+        email: { type: [string, "null"], maxLength: 200, format: email }
+        message: { type: [string, "null"], maxLength: 2000 }
+        item_id: { type: [integer, "null"], description: Id of the car the lead is about (from CarDetail.id). }
+        lang: { type: [string, "null"], maxLength: 5, description: "Visitor language (pt|en|ru|ua)." }
+        source: { type: [string, "null"], maxLength: 60, description: "Originating form/context (e.g. car_page, contact)." }
+        value_eur: { type: [integer, "null"], minimum: 0, description: "Optional deal-value anchor, EUR." }
+        consent:
+          type: boolean
+          default: false
+          description: Explicit opt-in to store the contact. Must be true or the request is rejected (422).
