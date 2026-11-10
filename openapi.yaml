@@ -1,8 +1,8 @@
 openapi: 3.1.0
 info:
   title: TransparentCars Public API
-  version: "1.0.0"
-  summary: Key-free JSON API for the Portuguese local used-car market — stock, fair-price valuation, annual road tax (IUC) and lead capture.
+  version: "1.1.0"
+  summary: Key-free JSON API for buying a car in Portugal — stock, fair-price valuation, car taxes (ISV/IUC), the full cost of importing a car from Germany/EU, and lead capture.
   description: |
     Open, key-free JSON API from **TransparentCars** (transparent.pt) — affordable used cars,
     no hidden costs. It exposes the same data the public site runs on:
@@ -12,6 +12,9 @@ info:
       listings (asking-price band). Answers "is this price fair?".
     - `GET /isv` — a **running-cost / road-tax** lookup. The useful field is `iuc`
       (Imposto Único de Circulação, the **annual road tax** a car costs to keep on the road).
+    - `GET /import-cost` — the **turnkey cost of importing a car from Germany / the EU** to
+      Portugal: car price (seller VAT swapped for Portuguese IVA when the listing is VAT-deductible),
+      transport, paperwork, service and ISV in one total; IUC per year returned apart.
     - `GET /car_refs` — the canonical make / model vocabulary the valuation endpoint expects.
     - `POST /lead` — consent-gated contact / callback request.
 
@@ -56,6 +59,8 @@ tags:
     description: Fair-price range for a car from comparable Portuguese listings.
   - name: Running costs
     description: Annual road-tax (IUC) lookup — what a car costs to keep on the road.
+  - name: Import
+    description: Full cost of importing a car from Germany / the EU to Portugal.
   - name: Leads
     description: Consent-gated contact / callback capture.
 
@@ -64,6 +69,7 @@ x-rate-limit:
   cars: DB-backed listing endpoints, tighter than the calculators.
   valuation: 20 requests / 5 min / IP (each call hits the comparables DB).
   isv: 60 requests / minute / IP (cached; a cache hit is free).
+  import-cost: shares the isv budget — 60 requests / minute / IP.
   lead: 20 requests / 5 min / IP.
   headers: 429 responses on the road-tax endpoint include `Retry-After` (seconds).
 
@@ -346,6 +352,100 @@ paths:
         "429":
           $ref: "#/components/responses/RateLimited"
 
+  /import-cost:
+    get:
+      tags: [Import]
+      operationId: importCost
+      summary: Turnkey cost of importing a car from Germany / the EU to Portugal
+      description: |
+        Total a buyer pays to get a car from another EU country (typically a mobile.de or
+        AutoScout24 listing in Germany) registered on Portuguese plates through TransparentCars:
+
+        `total_eur = car.cost + transport_eur + paperwork_eur + service_eur + isv_eur`
+
+        **VAT (net / gross).** `vat=final` — the listing price is final (private seller or margin
+        scheme, no VAT line). `vat=gross` — a dealer listing that shows deductible VAT
+        ("MwSt. ausweisbar", e.g. "€36,958 Net, 19% VAT"): the seller-country VAT (`vat_rate`) is
+        removed and Portuguese IVA 23% is applied to the net price. `vat=net` — the price given is
+        already net; 23% IVA is added.
+
+        ISV uses the same engine and age rules as `GET /isv` (passenger car, EU origin, age
+        reduction from first registration). `iuc_per_year_eur` is the annual road tax — an
+        ownership cost, not part of the total. Estimates: final ISV is set by the tax authority
+        from the COC; `warnings` flags inputs that make the ISV unreliable (missing cc / CO₂ /
+        year, PHEV without electric range).
+      parameters:
+        - name: price
+          in: query
+          required: true
+          description: Price on the listing, EUR (> 0).
+          schema: { type: number, exclusiveMinimum: 0, example: 19500 }
+        - name: vat
+          in: query
+          description: How to read `price` — see VAT above.
+          schema: { type: string, enum: [final, gross, net], default: final }
+        - name: vat_rate
+          in: query
+          description: Seller-country VAT % for `vat=gross` (DE 19, AT 20, IT 22, ES 21, FR 20, NL 21, BE 21).
+          schema: { type: number, minimum: 5, maximum: 30, default: 19 }
+        - name: cc
+          in: query
+          description: Engine displacement in cm³. 0 for pure-electric.
+          schema: { type: integer, minimum: 0, maximum: 10000, default: 0, example: 1498 }
+        - name: co2
+          in: query
+          description: CO₂ g/km (WLTP for 2020+).
+          schema: { type: integer, minimum: 0, maximum: 1000, default: 0, example: 130 }
+        - name: fuel
+          in: query
+          schema:
+            type: string
+            enum: [petrol, diesel, hybrid, hybrid_diesel, phev, electric, lpg]
+            default: petrol
+        - name: year
+          in: query
+          description: First-registration year.
+          schema: { type: integer, minimum: 1950, maximum: 2100, example: 2021 }
+        - name: month
+          in: query
+          description: First-registration month 1–12.
+          schema: { type: integer, minimum: 1, maximum: 12, default: 6 }
+        - name: range_km
+          in: query
+          description: Electric range (km) for plug-in hybrids — 50 km+ (and low CO₂) gives the 75% ISV reduction.
+          schema: { type: integer, minimum: 0, maximum: 2000, default: 0 }
+        - name: used
+          in: query
+          description: Used (true) vs new (false — up to 6 months / 6,000 km, no age reduction).
+          schema: { type: boolean, default: true }
+      responses:
+        "200":
+          description: Turnkey breakdown.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ImportCostResult" }
+              examples:
+                golf_2021:
+                  summary: VW Golf 1.5 TSI 2021, private seller, 19 500 €
+                  value:
+                    currency: EUR
+                    car: { listing_price: 19500, vat_mode: final, net: null, pt_iva_pct: null, cost: 19500 }
+                    transport_eur: 1200
+                    paperwork_eur: 500
+                    service_eur: 2500
+                    isv_eur: 1092
+                    total_eur: 24792
+                    above_listing_eur: 5292
+                    iuc_per_year_eur: 148
+                    warnings: []
+        "422":
+          description: Missing / invalid price, vat mode or fuel.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
   /lead:
     post:
       tags: [Leads]
@@ -543,6 +643,32 @@ components:
         age_years: { type: number }
         age_reduction_pct: { type: integer }
 
+    ImportCostResult:
+      type: object
+      required: [currency, car, transport_eur, paperwork_eur, service_eur, isv_eur, total_eur]
+      properties:
+        currency: { type: string, const: EUR }
+        car:
+          type: object
+          properties:
+            listing_price: { type: integer }
+            vat_mode: { type: string, enum: [final, gross, net] }
+            seller_vat_pct: { type: [number, "null"] }
+            net: { type: [integer, "null"], description: Net price when VAT applies. }
+            pt_iva_pct: { type: [integer, "null"], description: Portuguese IVA applied to the net price (23). }
+            cost: { type: integer, description: Car cost landed in Portugal before transport / ISV. }
+        transport_eur: { type: integer, description: Germany → Portugal transport. }
+        paperwork_eur: { type: integer, description: Inspection, IMT fees, registration, plates, documents. }
+        service_eur: { type: integer, description: TransparentCars turnkey service. }
+        isv_eur: { type: integer, description: Vehicle registration tax (ISV). }
+        total_eur: { type: integer, description: Turnkey total with Portuguese plates. }
+        above_listing_eur: { type: integer }
+        iuc_per_year_eur: { type: [integer, "null"], description: Annual road tax — ownership cost, not in the total. }
+        isv: { $ref: "#/components/schemas/IsvResult" }
+        iuc: { $ref: "#/components/schemas/IucResult" }
+        warnings: { type: array, items: { type: string } }
+        assumptions: { type: object }
+        calculator: { type: string, format: uri }
     LeadIn:
       type: object
       required: [kind, consent]
