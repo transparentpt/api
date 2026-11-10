@@ -33,6 +33,7 @@ workflow — just stock, fair price, and road tax.
 | `GET /valuation?make=&model=&year=&km=` | **Fair-price band** from comparable Portuguese listings. Optional: `fuel`, `gearbox`, `hp`. |
 | `GET /isv?cc=&co2=&fuel=&year=` | **Annual road tax** — read the `iuc` field (EUR/year). |
 | `GET /import-cost?price=&vat=&cc=&co2=&fuel=&year=` | **Full cost of importing a car from Germany/EU** to Portugal: car (net/gross VAT → PT IVA 23%), transport, paperwork, service and ISV in one `total_eur`; IUC/year apart. |
+| `GET /legalization-cost?cc=&co2=&fuel=&year=&coc=` | **Legalising a car already in Portugal**: fixed service fee + ISV + state fees (+ COC if missing) as a low/high range, with included / not-included lists. |
 | `GET /car_refs?make=` | Canonical make/model vocabulary for `/valuation`. |
 | `POST /lead` | Consent-gated contact / callback request. |
 

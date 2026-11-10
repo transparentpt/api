@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: TransparentCars Public API
-  version: "1.1.0"
+  version: "1.2.0"
   summary: Key-free JSON API for buying a car in Portugal — stock, fair-price valuation, car taxes (ISV/IUC), the full cost of importing a car from Germany/EU, and lead capture.
   description: |
     Open, key-free JSON API from **TransparentCars** (transparent.pt) — affordable used cars,
@@ -15,6 +15,9 @@ info:
     - `GET /import-cost` — the **turnkey cost of importing a car from Germany / the EU** to
       Portugal: car price (seller VAT swapped for Portuguese IVA when the listing is VAT-deductible),
       transport, paperwork, service and ISV in one total; IUC per year returned apart.
+    - `GET /legalization-cost` — what it costs to **legalise a car already in Portugal** (registered
+      in another EU country): fixed service fee + ISV + state fees (+ COC if missing) as a low/high
+      range, with the lists of what the fee includes and what is paid separately at real cost.
     - `GET /car_refs` — the canonical make / model vocabulary the valuation endpoint expects.
     - `POST /lead` — consent-gated contact / callback request.
 
@@ -60,7 +63,7 @@ tags:
   - name: Running costs
     description: Annual road-tax (IUC) lookup — what a car costs to keep on the road.
   - name: Import
-    description: Full cost of importing a car from Germany / the EU to Portugal.
+    description: Full cost of importing a car from Germany / the EU to Portugal, and of legalising one already here.
   - name: Leads
     description: Consent-gated contact / callback capture.
 
@@ -70,6 +73,7 @@ x-rate-limit:
   valuation: 20 requests / 5 min / IP (each call hits the comparables DB).
   isv: 60 requests / minute / IP (cached; a cache hit is free).
   import-cost: shares the isv budget — 60 requests / minute / IP.
+  legalization-cost: shares the isv budget — 60 requests / minute / IP.
   lead: 20 requests / 5 min / IP.
   headers: 429 responses on the road-tax endpoint include `Retry-After` (seconds).
 
@@ -446,6 +450,77 @@ paths:
         "429":
           $ref: "#/components/responses/RateLimited"
 
+  /legalization-cost:
+    get:
+      tags: [Import]
+      operationId: legalizationCost
+      summary: Cost of legalising a car that is already in Portugal
+      description: |
+        For a passenger car registered in another EU country and already in Portugal, the cost of
+        getting Portuguese plates through TransparentCars:
+
+        `total_eur = service_eur + isv_eur + state_fees_eur (+ coc_eur when coc=false)`, as a low/high range.
+
+        Only `service_eur` is the TransparentCars price (fixed). ISV, state fees (inspection, IMT,
+        registration, DUA, plates) and the COC are paid separately at real cost, against the official
+        receipts. `included_in_service` and `not_included` list exactly what the fee does and doesn't
+        cover. State-fee figures are estimates; ISV uses the same engine as `GET /isv`.
+      parameters:
+        - name: cc
+          in: query
+          description: Engine displacement in cm³. 0 for pure-electric.
+          schema: { type: integer, minimum: 0, maximum: 10000, default: 0, example: 1598 }
+        - name: co2
+          in: query
+          description: CO₂ g/km (WLTP for 2020+).
+          schema: { type: integer, minimum: 0, maximum: 1000, default: 0, example: 130 }
+        - name: fuel
+          in: query
+          schema:
+            type: string
+            enum: [petrol, diesel, hybrid, hybrid_diesel, phev, electric, lpg]
+            default: petrol
+        - name: year
+          in: query
+          description: First-registration year.
+          schema: { type: integer, minimum: 1950, maximum: 2100, example: 2019 }
+        - name: month
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 12, default: 6 }
+        - name: range_km
+          in: query
+          description: Electric range for plug-in hybrids (50 km+ gives the 75% ISV reduction).
+          schema: { type: integer, minimum: 0, maximum: 2000, default: 0 }
+        - name: coc
+          in: query
+          description: Whether the car has its COC (certificate of conformity). false adds the COC cost range.
+          schema: { type: boolean, default: true }
+      responses:
+        "200":
+          description: Legalisation cost range.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/LegalizationCostResult" }
+              examples:
+                diesel_2019:
+                  summary: 1.6 diesel 2019, 130 g/km, has COC
+                  value:
+                    currency: EUR
+                    service_eur: 490
+                    isv_eur: 2516
+                    state_fees_eur: { low: 260, high: 330 }
+                    coc_eur: null
+                    total_eur: { low: 3266, high: 3336 }
+                    iuc_per_year_eur: 196
+                    warnings: []
+        "422":
+          description: Unknown fuel.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
   /lead:
     post:
       tags: [Leads]
@@ -669,6 +744,33 @@ components:
         warnings: { type: array, items: { type: string } }
         assumptions: { type: object }
         calculator: { type: string, format: uri }
+    LegalizationCostResult:
+      type: object
+      required: [currency, service_eur, isv_eur, state_fees_eur, total_eur]
+      properties:
+        currency: { type: string, const: EUR }
+        service_eur: { type: integer, description: Fixed TransparentCars service fee — the only part that is our price. }
+        isv_eur: { type: integer, description: ISV, paid to the tax authority at real cost. }
+        state_fees_eur:
+          type: object
+          description: Inspection, IMT, registration, DUA and plates — estimate range, paid at real cost.
+          properties: { low: { type: integer }, high: { type: integer } }
+        coc_eur:
+          type: [object, "null"]
+          description: COC cost range when coc=false; null when the car has its COC.
+          properties: { low: { type: integer }, high: { type: integer } }
+        total_eur:
+          type: object
+          properties: { low: { type: integer }, high: { type: integer } }
+        iuc_per_year_eur: { type: [integer, "null"] }
+        included_in_service: { type: array, items: { type: string } }
+        not_included: { type: array, items: { type: string } }
+        paid_at_real_cost: { type: array, items: { type: string } }
+        isv: { $ref: "#/components/schemas/IsvResult" }
+        iuc: { $ref: "#/components/schemas/IucResult" }
+        warnings: { type: array, items: { type: string } }
+        assumptions: { type: object }
+        service_page: { type: string, format: uri }
     LeadIn:
       type: object
       required: [kind, consent]
