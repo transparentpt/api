@@ -32,6 +32,7 @@ workflow — just stock, fair price, and road tax.
 | `GET /cars/{slug}` | Full detail for one car (specs, description, photos, YouTube). |
 | `GET /valuation?make=&model=&year=&km=` | **Fair-price band** from comparable Portuguese listings. Optional: `fuel`, `gearbox`, `hp`. |
 | `GET /isv?cc=&co2=&fuel=&year=` | **Annual road tax** — read the `iuc` field (EUR/year). |
+| `GET /import-cost?price=&vat=&cc=&co2=&fuel=&year=` | **Full cost of importing a car from Germany/EU** to Portugal: car (net/gross VAT → PT IVA 23%), transport, paperwork, service and ISV in one `total_eur`; IUC/year apart. |
 | `GET /car_refs?make=` | Canonical make/model vocabulary for `/valuation`. |
 | `POST /lead` | Consent-gated contact / callback request. |
 
@@ -48,6 +49,9 @@ curl "$BASE/valuation?make=Renault&model=Clio&year=2015&km=118000&fuel=diesel"
 
 # Annual road tax (IUC) — read the .iuc field
 curl "$BASE/isv?cc=1200&co2=120&fuel=petrol&year=2016" | jq '.iuc'
+
+# Turnkey cost of a German dealer car listed at 43 980 € incl. deductible 19% VAT
+curl "$BASE/import-cost?price=43980&vat=gross&cc=1498&co2=138&fuel=hybrid&year=2024" | jq '.total_eur'
 
 # Vocabulary for the valuation endpoint
 curl "$BASE/car_refs?make=BMW"
